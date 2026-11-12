@@ -9,7 +9,7 @@ setrlimit(RLIMIT_CORE, &noCore)
 let arguments = CommandLine.arguments
 Atlas.registerFonts()
 if arguments.contains("--version") {
-    print("Embalm 1.0.0")
+    print("Embalm 1.3.0")
     exit(0)
 }
 if arguments.contains("--self-check") {
@@ -25,6 +25,55 @@ if arguments.contains("--self-check") {
     print(envOK && cryptoOK ? "SELF-CHECK PASSED" : "SELF-CHECK FAILED")
     exit(envOK && cryptoOK ? 0 : 1)
 }
+
+#if EMBALM_PROBE
+// Development-only: draws the windows into PNG files without showing them, so
+// layout can be checked without driving the screen. Compiled out of every release build.
+if let i = arguments.firstIndex(of: "--render"), i + 2 < arguments.count {
+    _ = NSApplication.shared
+    Prefs.register()
+    let dir = URL(fileURLWithPath: arguments[i + 1])
+    func png(_ v: NSView, _ name: String) {
+        v.layoutSubtreeIfNeeded()
+        guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent(name))
+    }
+    let g = GeneratorWindowController()
+    Prefs.genRandom = false; Prefs.genWords = 5; g.prepare(); png(g.window.contentView!, "generator-memorable.png")
+    Prefs.genWords = 10; g.prepare(); png(g.window.contentView!, "generator-memorable-10.png")
+    Prefs.genRandom = true; Prefs.genLength = 64; g.prepare(); png(g.window.contentView!, "generator-random-64.png")
+    Prefs.genRandom = false; Prefs.genWords = 5; Prefs.genLength = 24
+    let sample = URL(fileURLWithPath: arguments[i + 2])
+    Prefs.duress = false; Prefs.quorum = false; Prefs.keyFile = false
+    let c = MainController()
+    c.window.alphaValue = 0
+    c.accept([sample])
+    png(c.window.contentView!, "main-embalm.png")
+    Prefs.duress = true
+    c.accept([sample]); c.probeEnter("correct horse battery")
+    png(c.window.contentView!, "main-duress.png")
+    Prefs.duress = false; Prefs.quorum = true; Prefs.quorumPreset = 1
+    c.accept([sample]); c.probeEnter("correct horse battery")
+    png(c.window.contentView!, "main-quorum-embalm.png")
+    Prefs.keyFile = true
+    png(SettingsWindowController().window.contentView!, "settings.png")
+    Prefs.quorum = false; Prefs.keyFile = false
+    let fast = KDFChoice.argon2id(timeCost: 1, memoryLog2KiB: 10, parallelism: 1)
+    let body = dir.appendingPathComponent("render-detached.emb"), key = dir.appendingPathComponent("render-detached.embkey")
+    let shared = dir.appendingPathComponent("render-quorum.emb")
+    [body, key, shared].forEach { try? FileManager.default.removeItem(at: $0) }
+    try? EmbalmEngine.embalm(input: sample, output: body, password: "pw", kdf: fast, keyFile: key)
+    try? EmbalmEngine.embalm(input: sample, output: shared, passwords: ["a1", "b2", "c3"], threshold: 2, kdf: fast)
+    c.accept([body])
+    png(c.window.contentView!, "main-needs-key.png")
+    c.accept([body, key])
+    png(c.window.contentView!, "main-key-paired.png")
+    c.accept([shared])
+    png(c.window.contentView!, "main-quorum-open.png")
+    exit(0)
+}
+#endif
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var controller: MainController?

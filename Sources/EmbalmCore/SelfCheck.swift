@@ -63,7 +63,7 @@ public enum SelfCheck {
             try fm.createDirectory(at: sub, withIntermediateDirectories: true)
             let input = sub.appendingPathComponent(name)
             try data.write(to: input)
-            let out = sub.appendingPathComponent("sealed.embalm")
+            let out = sub.appendingPathComponent("sealed.emb")
             try EmbalmEngine.embalm(input: input, output: out, password: password, kdf: kdf, padding: padding)
             return out
         }
@@ -80,6 +80,22 @@ public enum SelfCheck {
         func failures(_ url: URL) throws -> Int { try EmbalmEngine.inspect(input: url).failureCount }
 
         let C = EmbalmEngine.chunkSize
+        typealias V4 = EmbalmFormat.V4
+
+        /// A fresh folder holding `data` as `name`, for tests that set their own options.
+        func source(_ data: Data, _ name: String = "secret.txt") throws -> (dir: URL, input: URL, out: URL) {
+            let sub = dir.appendingPathComponent(UUID().uuidString)
+            try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+            let input = sub.appendingPathComponent(name)
+            try data.write(to: input)
+            return (sub, input, sub.appendingPathComponent(name + ".emb"))
+        }
+        func contents(_ o: EmbalmEngine.OpenedContainer) throws -> Data {
+            defer { o.close() }
+            let out = dir.appendingPathComponent("out-\(UUID().uuidString)")
+            try o.write(to: out)
+            return try Data(contentsOf: out)
+        }
 
         // MARK: known answers
         run("Known answers", "AES-256-GCM matches the published test vector") {
@@ -135,7 +151,7 @@ public enum SelfCheck {
             let original = RandomBytes.makeData(5 * C / 2 + 123)
             let c = try seal(original)
             let st = try EmbalmEngine.inspect(input: c)
-            try expect(st.formatVersion == 3 && st.structurallyIntact, "bad status")
+            try expect(st.formatVersion == 4 && st.structurallyIntact, "bad status")
             try expect(try open(c) == original, "differs")
             return "\(st.fileSize) bytes on disk"
         }
@@ -241,9 +257,10 @@ public enum SelfCheck {
             try expectError(.alreadyDestroyed) { _ = try open(c, "pw") }
             let after = [UInt8](try Data(contentsOf: c))
             try expect(after.count == before.count, "size changed")
-            let keyRegion = EmbalmFormat.offWrappedDEK..<(EmbalmFormat.offWrappedDEK + 48)
-            try expect(Array(after[keyRegion]) != Array(before[keyRegion]), "key not overwritten")
-            let payloadStart = EmbalmFormat.v3HeaderLength
+            let keyRegion = V4.headLength..<V4.plainDecoyOffset
+            let unchanged = zip(before[keyRegion], after[keyRegion]).filter { $0 == $1 }.count
+            try expect(unchanged < 12, "key slots not overwritten")
+            let payloadStart = V4.plainDecoyOffset
             let same = zip(before[payloadStart...], after[payloadStart...]).filter { $0 == $1 }.count
             try expect(Double(same) < Double(before.count - payloadStart) * 0.02, "payload not overwritten")
             return nil
@@ -270,7 +287,7 @@ public enum SelfCheck {
         // MARK: tampering and transit damage
         run("Tampering", "A changed byte in a later chunk is caught and no output is kept") {
             let c = try seal(RandomBytes.makeData(5 * C / 2))
-            try mutate(c) { $0[EmbalmFormat.v3HeaderLength + (C + 16) + 100] ^= 0x01 }
+            try mutate(c) { $0[V4.plainPayloadOffset + (C + 16) + 100] ^= 0x01 }
             let opened = try EmbalmEngine.unlock(input: c, password: "pw")
             defer { opened.close() }
             let out = dir.appendingPathComponent("tamper-out")
@@ -280,14 +297,14 @@ public enum SelfCheck {
         }
         run("Tampering", "A changed byte in the first chunk is caught") {
             let c = try seal(RandomBytes.makeData(5000))
-            try mutate(c) { $0[EmbalmFormat.v3HeaderLength + 20] ^= 0x80 }
+            try mutate(c) { $0[V4.plainPayloadOffset + 20] ^= 0x80 }
             try expectError(.integrityCheckFailed) { _ = try open(c) }
             return nil
         }
         run("Tampering", "Swapped chunks are caught") {
             let c = try seal(RandomBytes.makeData(5 * C / 2))
             try mutate(c) { b in
-                let s = EmbalmFormat.v3HeaderLength, u = C + 16
+                let s = V4.plainPayloadOffset, u = C + 16
                 let first = Array(b[s..<(s + u)]), second = Array(b[(s + u)..<(s + 2 * u)])
                 b.replaceSubrange(s..<(s + u), with: second)
                 b.replaceSubrange((s + u)..<(s + 2 * u), with: first)
@@ -295,19 +312,28 @@ public enum SelfCheck {
             try expectError(.integrityCheckFailed) { _ = try open(c) }
             return nil
         }
-        run("Tampering", "Cutting off the last chunk and fixing the length is caught") {
+        run("Tampering", "Cutting off the last chunk is caught, even with the length and checksum fixed") {
             let c = try seal(RandomBytes.makeData(5 * C / 2))
+            var lastLen = 0, payload = 0
             try mutate(c) { b in
                 let u = C + 16
-                let payload = b.count - EmbalmFormat.v3HeaderLength
-                let n = (payload + u - 1) / u
-                let lastLen = payload - (n - 1) * u
+                payload = b.count - V4.plainPayloadOffset
+                lastLen = payload - ((payload + u - 1) / u - 1) * u
                 b.removeLast(lastLen)
-                var d = Data(); d.appendBigEndian(UInt64(payload - lastLen))
-                b.replaceSubrange(EmbalmFormat.v3OffPayloadLen..<(EmbalmFormat.v3OffPayloadLen + 8), with: d)
             }
-            try expectError(.integrityCheckFailed) { _ = try open(c) }
-            return nil
+            do { _ = try open(c); throw Fail(message: "a cut file opened") }
+            catch let e as EmbalmError { guard case .damaged = e else { throw Fail(message: "got \(e)") } }
+            try expect(try failures(c) == 0, "an attempt was used")
+            // The length is authenticated, so a forged one cannot unwrap the key.
+            try mutate(c) { b in
+                var d = Data(); d.appendBigEndian(UInt64(payload - lastLen))
+                b.replaceSubrange(V4.offPayloadLen..<(V4.offPayloadLen + 8), with: d)
+                var masked = Array(b[0..<V4.offCRC]); masked[EmbalmFormat.offFailureCount] = 0
+                var crc = Data(); crc.appendBigEndian(CRC32.checksum(masked))
+                b.replaceSubrange(V4.offCRC..<(V4.offCRC + 4), with: crc)
+            }
+            do { _ = try open(c) } catch let e as EmbalmError { if case .wrongPassword = e { return nil }; throw Fail(message: "got \(e)") }
+            throw Fail(message: "the forged file opened")
         }
         run("Tampering", "Extra bytes appended to the file are reported as damage") {
             let c = try seal(RandomBytes.makeData(500))
@@ -325,15 +351,15 @@ public enum SelfCheck {
             let c = try seal(RandomBytes.makeData(500))
             try mutate(c) { b in
                 b[EmbalmFormat.offMaxFailures] = 99
-                var masked = Array(b[0..<106]); masked[EmbalmFormat.offFailureCount] = 0
+                var masked = Array(b[0..<V4.offCRC]); masked[EmbalmFormat.offFailureCount] = 0
                 var d = Data(); d.appendBigEndian(CRC32.checksum(masked))
-                b.replaceSubrange(EmbalmFormat.v3OffCRC..<(EmbalmFormat.v3OffCRC + 4), with: d)
+                b.replaceSubrange(V4.offCRC..<(V4.offCRC + 4), with: d)
             }
             do { _ = try open(c) } catch let e as EmbalmError { if case .wrongPassword = e { return nil }; throw Fail(message: "got \(e)") }
             throw Fail(message: "the forged file opened")
         }
         run("Tampering", "Folders and non-files are refused") {
-            let out = dir.appendingPathComponent("folder.embalm")
+            let out = dir.appendingPathComponent("folder.emb")
             do { try EmbalmEngine.embalm(input: dir, output: out, password: "pw", kdf: fastArgon) }
             catch is EmbalmError { return nil }
             throw Fail(message: "a folder was accepted")
@@ -354,10 +380,278 @@ public enum SelfCheck {
                 return nil
             }
         }
+        run("Older files", "The tripwire still destroys a v3 file") {
+            guard let fixture = LegacyFixtures.all.last, let data = Data(base64Encoded: fixture.base64) else { throw Fail(message: "bad fixture") }
+            let u = try put(data, "legacy-tripwire.embalm")
+            try expect(try EmbalmEngine.inspect(input: u).formatVersion == 3, "not a v3 fixture")
+            try expectError(.wrongPassword(remaining: 1)) { _ = try open(u, "WRONG1") }
+            try expectError(.destroyed) { _ = try open(u, "WRONG2") }
+            try expectError(.alreadyDestroyed) { _ = try open(u, "fixture-pass") }
+            return nil
+        }
         run("Older files", "Legacy files that expose a fingerprint are flagged") {
             guard let data = Data(base64Encoded: LegacyFixtures.all[0].base64) else { throw Fail(message: "bad fixture") }
             let u = try put(data, "legacy-flag.embalm")
             try expect(try EmbalmEngine.inspect(input: u).exposesLegacyFingerprint, "not flagged")
+            return nil
+        }
+
+        run("Metadata", "New files end in .emb, and both .emb and the older .embalm are stripped on the way back") {
+            try expect(EmbalmEngine.fileExtension == "emb", "extension changed")
+            let input = try put(Data("x".utf8), "report.pdf")
+            let out = dir.appendingPathComponent("nameless.emb")
+            try EmbalmEngine.embalm(input: input, output: out, password: "pw", kdf: fastArgon, storeName: false)
+            let o = try EmbalmEngine.unlock(input: out, password: "pw")
+            defer { o.close() }
+            try expect(o.originalName == nil, "a name was stored")
+            for (given, wanted) in [("report.pdf.emb", "report.pdf"), ("report.pdf.EMB", "report.pdf"),
+                                    ("report.pdf.embalm", "report.pdf"), ("report.bin", "report.bin.mummified")] {
+                let got = EmbalmEngine.suggestedOutputName(opened: o, inputName: given)
+                try expect(got == wanted, "\(given) gave \(got)")
+            }
+            return nil
+        }
+
+        // MARK: duress password
+        run("Duress password", "The real password opens the file and the duress password opens the decoy") {
+            let real = RandomBytes.makeData(9000), fake = Data("nothing to see here".utf8)
+            let s = try source(real, "accounts.xlsx")
+            let decoy = try put(fake, "shopping list.txt")
+            try EmbalmEngine.embalm(input: s.input, output: s.out, password: "pw", kdf: fastArgon,
+                                    duress: .init(password: "duress", decoy: decoy))
+            let a = try EmbalmEngine.unlock(input: s.out, password: "pw")
+            try expect(a.originalName == "accounts.xlsx", "real name lost")
+            try expect(try contents(a) == real, "real content differs")
+            let b = try EmbalmEngine.unlock(input: s.out, password: "duress")
+            try expect(b.originalName == "shopping list.txt", "decoy name lost")
+            try expect(try contents(b) == fake, "decoy content differs")
+            return nil
+        }
+        run("Duress password", "Using it destroys the real key for good, and the decoy keeps opening") {
+            let s = try source(RandomBytes.makeData(500))
+            let decoy = try put(Data("decoy".utf8), "decoy-a.txt")
+            try EmbalmEngine.embalm(input: s.input, output: s.out, password: "pw", kdf: fastArgon,
+                                    duress: .init(password: "duress", decoy: decoy))
+            let before = [UInt8](try Data(contentsOf: s.out))
+            _ = try contents(try EmbalmEngine.unlock(input: s.out, password: "duress"))
+            let after = [UInt8](try Data(contentsOf: s.out))
+            try expectError(.wrongPassword(remaining: 1)) { _ = try EmbalmEngine.unlock(input: s.out, password: "pw") }
+            try expect(try contents(try EmbalmEngine.unlock(input: s.out, password: "duress")) == Data("decoy".utf8), "decoy stopped opening")
+            // Only one key slot changed; nothing else in the file was touched.
+            let changed = before.indices.filter { before[$0] != after[$0] }
+            guard let lo = changed.first, let hi = changed.last else { throw Fail(message: "nothing was destroyed") }
+            let slot = (lo - V4.headLength) / V4.slotLength
+            try expect(lo >= V4.headLength && hi < V4.plainDecoyOffset && (hi - V4.headLength) / V4.slotLength == slot, "more than one slot changed")
+            try expect(changed.count > 40, "the slot was not overwritten")
+            return nil
+        }
+        run("Duress password", "A file with a duress password has the same size and layout as one without") {
+            let data = RandomBytes.makeData(700)
+            let a = try source(data), b = try source(data)
+            let decoy = try put(RandomBytes.makeData(40_000), "decoy-b.bin")
+            try EmbalmEngine.embalm(input: a.input, output: a.out, password: "pw", kdf: fastArgon)
+            try EmbalmEngine.embalm(input: b.input, output: b.out, password: "pw", kdf: fastArgon,
+                                    duress: .init(password: "duress", decoy: decoy))
+            let x = [UInt8](try Data(contentsOf: a.out)), y = [UInt8](try Data(contentsOf: b.out))
+            try expect(x.count == y.count, "\(x.count) vs \(y.count) bytes")
+            // Everything in the clear that is not random per file is identical.
+            for r in [0..<EmbalmFormat.offSalt, V4.offChunkLog2..<V4.offCRC] {
+                try expect(Array(x[r]) == Array(y[r]), "the headers differ at \(r)")
+            }
+            return "\(x.count) bytes each"
+        }
+        run("Duress password", "Bad duress settings are refused before anything is written") {
+            let s = try source(Data("x".utf8))
+            let small = try put(Data("d".utf8), "decoy-c.txt")
+            let big = try put(Data(count: EmbalmEngine.maxDecoyBytes + 1), "decoy-big.bin")
+            try expectError(.decoyTooLarge) {
+                try EmbalmEngine.embalm(input: s.input, output: s.out, password: "pw", kdf: fastArgon, duress: .init(password: "duress", decoy: big))
+            }
+            do {
+                try EmbalmEngine.embalm(input: s.input, output: s.out, password: "caf\u{E9}", kdf: fastArgon,
+                                        duress: .init(password: "cafe\u{301}", decoy: small))
+                throw Fail(message: "the same password was accepted twice")
+            } catch let e as EmbalmError { guard case .invalidOptions = e else { throw Fail(message: "got \(e)") } }
+            try expect(!fm.fileExists(atPath: s.out.path), "a file was left behind")
+            return nil
+        }
+
+        // MARK: several passwords
+        run("Several passwords", "With 2 of 3, every pair opens the file, in either order, and one alone does not") {
+            let data = RandomBytes.makeData(4000)
+            let s = try source(data)
+            let pws = ["alpha", "bravo", "charlie"]
+            try EmbalmEngine.embalm(input: s.input, output: s.out, passwords: pws, threshold: 2, kdf: fastArgon)
+            let st = try EmbalmEngine.inspect(input: s.out)
+            try expect(st.threshold == 2 && st.holders == 3, "layout reported as \(st.threshold) of \(st.holders)")
+            for (i, j) in [(0, 1), (1, 0), (0, 2), (2, 1)] {
+                let session = try EmbalmEngine.beginOpen(input: s.out)
+                try expect(try session.offer(password: pws[i]) == nil, "one password opened the file")
+                guard let o = try session.offer(password: pws[j]) else { throw Fail(message: "two passwords were not enough") }
+                try expect(try contents(o) == data, "content differs")
+            }
+            try expectError(.morePasswordsNeeded(1)) { _ = try EmbalmEngine.unlock(input: s.out, password: "alpha") }
+            try expect(try failures(s.out) == 0, "a right password used an attempt")
+            return nil
+        }
+        run("Several passwords", "2 of 2 and 3 of 5 work, and too few of five do not") {
+            let data = RandomBytes.makeData(100)
+            let a = try source(data)
+            try EmbalmEngine.embalm(input: a.input, output: a.out, passwords: ["one", "two"], threshold: 2, kdf: fastArgon)
+            let sa = try EmbalmEngine.beginOpen(input: a.out)
+            _ = try sa.offer(password: "two")
+            guard let oa = try sa.offer(password: "one") else { throw Fail(message: "2 of 2 did not open") }
+            try expect(try contents(oa) == data, "content differs")
+            let b = try source(data)
+            let five = ["p1", "p2", "p3", "p4", "p5"]
+            try EmbalmEngine.embalm(input: b.input, output: b.out, passwords: five, threshold: 3, kdf: fastArgon)
+            let sb = try EmbalmEngine.beginOpen(input: b.out)
+            try expect(try sb.offer(password: "p5") == nil && sb.offer(password: "p2") == nil, "two of five opened it")
+            guard let ob = try sb.offer(password: "p4") else { throw Fail(message: "3 of 5 did not open") }
+            try expect(try contents(ob) == data, "content differs")
+            return nil
+        }
+        run("Several passwords", "A repeated password is not counted twice, and wrong ones still trip the wire") {
+            let s = try source(RandomBytes.makeData(100))
+            try EmbalmEngine.embalm(input: s.input, output: s.out, passwords: ["alpha", "bravo", "charlie"], threshold: 2, kdf: fastArgon)
+            let session = try EmbalmEngine.beginOpen(input: s.out)
+            _ = try session.offer(password: "alpha")
+            try expectError(.passwordAlreadyGiven) { _ = try session.offer(password: "alpha") }
+            try expect(session.accepted == 1, "counted twice")
+            try expectError(.wrongPassword(remaining: 1)) { _ = try session.offer(password: "WRONG1") }
+            try expectError(.destroyed) { _ = try session.offer(password: "WRONG2") }
+            session.close()
+            try expectError(.alreadyDestroyed) { _ = try EmbalmEngine.unlock(input: s.out, password: "bravo") }
+            return nil
+        }
+        run("Several passwords", "Repeated passwords, or a duress password as well, are refused") {
+            let s = try source(Data("x".utf8))
+            let decoy = try put(Data("d".utf8), "decoy-d.txt")
+            for attempt in 0..<2 {
+                do {
+                    if attempt == 0 {
+                        try EmbalmEngine.embalm(input: s.input, output: s.out, passwords: ["same", "same"], threshold: 2, kdf: fastArgon)
+                    } else {
+                        try EmbalmEngine.embalm(input: s.input, output: s.out, passwords: ["a", "b"], threshold: 2, kdf: fastArgon,
+                                                duress: .init(password: "c", decoy: decoy))
+                    }
+                    throw Fail(message: "case \(attempt) was accepted")
+                } catch let e as EmbalmError { guard case .invalidOptions = e else { throw Fail(message: "got \(e)") } }
+            }
+            return nil
+        }
+
+        // MARK: key file
+        run("Key file", "The embalmed file is useless without its key file, and opens with it") {
+            let data = RandomBytes.makeData(3 * C / 2)
+            let s = try source(data, "plans.pdf")
+            let key = s.dir.appendingPathComponent("plans.embkey")
+            try EmbalmEngine.embalm(input: s.input, output: s.out, password: "pw", kdf: fastArgon, keyFile: key)
+            try expect(EmbalmEngine.isEmbalmFile(at: s.out) && EmbalmEngine.isKeyFile(at: key), "files not recognised")
+            try expect(!EmbalmEngine.isKeyFile(at: s.out) && !EmbalmEngine.isEmbalmFile(at: key), "files confused")
+            try expect(try EmbalmEngine.inspect(input: s.out).needsKeyFile, "the need for a key file was not reported")
+            try expectError(.keyFileNeeded) { _ = try EmbalmEngine.unlock(input: s.out, password: "pw") }
+            // The salt and every key slot are in the key file only.
+            let body = try Data(contentsOf: s.out), keyBytes = try Data(contentsOf: key)
+            try expect(body.range(of: keyBytes.subdata(in: EmbalmFormat.offSalt..<(EmbalmFormat.offSalt + 16))) == nil, "salt found in the embalmed file")
+            try expect(body.range(of: keyBytes.subdata(in: V4.headLength..<(V4.headLength + 24))) == nil, "a key slot was found in the embalmed file")
+            let o = try EmbalmEngine.unlock(input: s.out, password: "pw", keyFile: key)
+            try expect(o.originalName == "plans.pdf", "name lost")
+            try expect(try contents(o) == data, "content differs")
+            return "key file is \(keyBytes.count) bytes"
+        }
+        run("Key file", "Another file's key file is refused without using an attempt") {
+            let a = try source(RandomBytes.makeData(50)), b = try source(RandomBytes.makeData(50))
+            let ka = a.dir.appendingPathComponent("a.embkey"), kb = b.dir.appendingPathComponent("b.embkey")
+            try EmbalmEngine.embalm(input: a.input, output: a.out, password: "pw", kdf: fastArgon, keyFile: ka)
+            try EmbalmEngine.embalm(input: b.input, output: b.out, password: "pw", kdf: fastArgon, keyFile: kb)
+            try expectError(.keyFileMismatch) { _ = try EmbalmEngine.unlock(input: a.out, password: "pw", keyFile: kb) }
+            try expectError(.notAKeyFile) { _ = try EmbalmEngine.unlock(input: a.out, password: "pw", keyFile: b.out) }
+            try expect(try EmbalmEngine.inspect(input: a.out, keyFile: ka).failureCount == 0, "an attempt was used")
+            _ = try contents(try EmbalmEngine.unlock(input: a.out, password: "pw", keyFile: ka))
+            return nil
+        }
+        run("Key file", "The tripwire counts in the key file and destroys both files") {
+            let s = try source(RandomBytes.makeData(2000))
+            let key = s.dir.appendingPathComponent("k.embkey")
+            try EmbalmEngine.embalm(input: s.input, output: s.out, password: "pw", kdf: fastArgon, keyFile: key)
+            let bodyBefore = [UInt8](try Data(contentsOf: s.out)), keyBefore = [UInt8](try Data(contentsOf: key))
+            try expectError(.wrongPassword(remaining: 1)) { _ = try EmbalmEngine.unlock(input: s.out, password: "WRONG1", keyFile: key) }
+            try expect(try EmbalmEngine.inspect(input: s.out, keyFile: key).failureCount == 1, "counter not saved in the key file")
+            try expect([UInt8](try Data(contentsOf: s.out)) == bodyBefore, "the embalmed file changed on a first miss")
+            try expectError(.destroyed) { _ = try EmbalmEngine.unlock(input: s.out, password: "WRONG2", keyFile: key) }
+            try expectError(.alreadyDestroyed) { _ = try EmbalmEngine.unlock(input: s.out, password: "pw", keyFile: key) }
+            let bodyAfter = [UInt8](try Data(contentsOf: s.out)), keyAfter = [UInt8](try Data(contentsOf: key))
+            let slots = V4.headLength..<keyBefore.count
+            try expect(zip(keyBefore[slots], keyAfter[slots]).filter { $0 == $1 }.count < 12, "key slots not overwritten")
+            let data = V4.stubLength..<bodyBefore.count
+            try expect(Double(zip(bodyBefore[data], bodyAfter[data]).filter { $0 == $1 }.count) < Double(data.count) * 0.02, "data not overwritten")
+            return nil
+        }
+        run("Key file", "A key file works together with a duress password and with several passwords") {
+            let data = RandomBytes.makeData(300)
+            let a = try source(data)
+            let ka = a.dir.appendingPathComponent("a.embkey")
+            let decoy = try put(Data("decoy".utf8), "decoy-e.txt")
+            try EmbalmEngine.embalm(input: a.input, output: a.out, password: "pw", kdf: fastArgon,
+                                    duress: .init(password: "duress", decoy: decoy), keyFile: ka)
+            try expect(try contents(try EmbalmEngine.unlock(input: a.out, password: "duress", keyFile: ka)) == Data("decoy".utf8), "decoy differs")
+            try expectError(.wrongPassword(remaining: 1)) { _ = try EmbalmEngine.unlock(input: a.out, password: "pw", keyFile: ka) }
+            let b = try source(data)
+            let kb = b.dir.appendingPathComponent("b.embkey")
+            try EmbalmEngine.embalm(input: b.input, output: b.out, passwords: ["x1", "x2", "x3"], threshold: 2, kdf: fastArgon, keyFile: kb)
+            let session = try EmbalmEngine.beginOpen(input: b.out, keyFile: kb)
+            _ = try session.offer(password: "x3")
+            guard let o = try session.offer(password: "x1") else { throw Fail(message: "did not open") }
+            try expect(try contents(o) == data, "content differs")
+            return nil
+        }
+
+        // MARK: password generator
+        run("Password generator", "The word list is complete, lowercase and free of duplicates") {
+            let w = Wordlist.words
+            try expect(w.count == 7768, "count is \(w.count)")
+            try expect(Set(w).count == w.count, "duplicates")
+            try expect(w.allSatisfy { $0.count >= 3 && $0.allSatisfy { c in c >= "a" && c <= "z" } }, "unexpected characters")
+            return "\(w.count) words"
+        }
+        run("Password generator", "Memorable passwords have the words, capitals and digits asked for") {
+            let words = Set(Wordlist.words)
+            for n in PasswordGenerator.wordRange {
+                for (caps, nums) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let g = PasswordGenerator.memorable(words: n, capitalize: caps, numbers: nums)
+                    let parts = g.password.split(separator: "-").map(String.init)
+                    try expect(parts.count == n, "\(parts.count) parts for \(n) words")
+                    for p in parts {
+                        var word = p
+                        if nums {
+                            try expect(word.last?.isNumber == true, "no digit")
+                            word.removeLast()
+                        }
+                        try expect((word.first?.isUppercase == true) == caps, "capitalisation")
+                        try expect(words.contains(word.lowercased()), "not from the list")
+                    }
+                    let expected = Double(n) * (log2(7768.0) + (nums ? log2(10.0) : 0))
+                    try expect(abs(g.bits - expected) < 1e-9, "strength misreported")
+                }
+            }
+            return nil
+        }
+        run("Password generator", "Random passwords have the length and characters asked for") {
+            let plain = Set(PasswordGenerator.alphanumerics), all = plain.union(PasswordGenerator.symbols)
+            for n in [12, 13, 24, 63, 64] {
+                let a = PasswordGenerator.random(length: n, symbols: false)
+                let b = PasswordGenerator.random(length: n, symbols: true)
+                try expect(a.password.count == n && b.password.count == n, "wrong length")
+                try expect(a.password.allSatisfy(plain.contains), "symbol where none was asked for")
+                try expect(b.password.allSatisfy(all.contains), "character outside the alphabet")
+                try expect(abs(b.bits - Double(n) * log2(70)) < 1e-9, "strength misreported")
+            }
+            try expect(all.count == 70, "alphabet has repeats")
+            // 2,000 characters from 70: every character should turn up, and no two runs match.
+            let long = (0..<32).map { _ in PasswordGenerator.random(length: 64, symbols: true).password }
+            try expect(Set(long.joined()).count == 70, "some characters never appear")
+            try expect(Set(long).count == long.count, "repeated output")
             return nil
         }
 

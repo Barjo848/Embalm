@@ -1,0 +1,21 @@
+#!/bin/sh
+# Runs after the app is copied. Registers the app and, for an install started
+# from the disk image, offers afterwards to move that image to the Trash.
+user="${USER:-}"
+[ -n "$user" ] && [ "$user" != root ] || user="$(/usr/bin/stat -f %Su /dev/console)"
+uid="$(/usr/bin/id -u "$user" 2>/dev/null)" || exit 0
+as_user() {
+    if [ "$(/usr/bin/id -u)" = 0 ]; then /bin/launchctl asuser "$uid" /usr/bin/sudo -u "$user" "$@"; else "$@"; fi
+}
+app="${2:-/Applications}/Embalm.app"
+as_user /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" >/dev/null 2>&1
+as_user /System/Library/CoreServices/pbs -flush >/dev/null 2>&1
+as_user /System/Library/CoreServices/pbs -update >/dev/null 2>&1
+
+[ -z "${COMMAND_LINE_INSTALL:-}" ] || exit 0
+case "$1" in /Volumes/*) ;; *) exit 0 ;; esac
+here="$(cd "$(dirname "$0")" && pwd)"
+helper="$(/usr/bin/mktemp /tmp/embalm-cleanup.XXXXXX)" || exit 0
+/bin/cp "$here/cleanup.sh" "$helper" && /bin/chmod 755 "$helper" && /usr/sbin/chown "$user" "$helper"
+as_user /usr/bin/nohup /bin/sh "$helper" "$1" >/dev/null 2>&1 &
+exit 0

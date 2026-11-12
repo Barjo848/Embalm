@@ -10,8 +10,8 @@
 	<key>CFBundlePackageType</key>            <string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
 	<key>CFBundleDevelopmentRegion</key>      <string>en</string>
-	<key>CFBundleShortVersionString</key>     <string>1.0.0</string>
-	<key>CFBundleVersion</key>                <string>1</string>
+	<key>CFBundleShortVersionString</key>     <string>1.3.0</string>
+	<key>CFBundleVersion</key>                <string>4</string>
 	<key>LSMinimumSystemVersion</key>         <string>12.0</string>
 	<key>LSApplicationCategoryType</key>      <string>public.app-category.utilities</string>
 	<key>LSMultipleInstancesProhibited</key>  <true/>
@@ -31,12 +31,32 @@
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
-				<array><string>embalm</string></array>
+				<array><string>emb</string><string>embalm</string></array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>        <string>com.embalm.keyfile</string>
+			<key>UTTypeDescription</key>       <string>Embalm key file</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.data</string></array>
+			<key>UTTypeIconFile</key>          <string>EmbalmDoc</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>embkey</string></array>
 			</dict>
 		</dict>
 	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
+		<dict>
+			<key>CFBundleTypeName</key>        <string>Embalm key file</string>
+			<key>CFBundleTypeRole</key>        <string>Editor</string>
+			<key>LSHandlerRank</key>           <string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array><string>com.embalm.keyfile</string></array>
+			<key>CFBundleTypeIconFile</key>    <string>EmbalmDoc</string>
+		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>        <string>Embalmed file</string>
 			<key>CFBundleTypeRole</key>        <string>Editor</string>

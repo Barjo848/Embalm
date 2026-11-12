@@ -1,0 +1,13 @@
+Embalm
+
+Copyright (c) 2026 the Embalm authors. MIT License.
+
+You may use, copy, modify and share this software freely, provided this notice stays with it.
+
+The software is provided "as is", without warranty of any kind. The authors are not liable for any claim, damages or loss arising from its use.
+
+Please understand before you rely on it:
+  - A forgotten password cannot be recovered by anyone.
+  - Wrong passwords destroy a file for good. That is the point of the app.
+
+Embalm includes the TeX Gyre Heros typeface (GUST e-foundry, GUST Font License), the Argon2 reference implementation (CC0 / Apache 2.0) and the EFF Large Wordlist (CC BY 3.0 US).

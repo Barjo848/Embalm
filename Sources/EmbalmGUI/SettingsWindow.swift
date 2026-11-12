@@ -14,6 +14,7 @@ final class SettingsWindowController: NSObject {
     private let strength = AtlasSegmented()
     private var boxes: [AtlasCheckbox] = []
     private let attemptValues = [2, 3, 5]
+    private let quorum = AtlasSegmented()
 
     override init() {
         window = AtlasWindowFactory.make(size: NSSize(width: 400, height: 520))
@@ -29,7 +30,7 @@ final class SettingsWindowController: NSObject {
     private var W: CGFloat { width - 44 }
 
     private func bar() {
-        let b = TitleBarView(); b.title = "Settings"; b.version = "v1.0.0"
+        let b = TitleBarView(); b.title = "Settings"; b.version = "v1.3.0"
         add(b, NSRect(x: 0, y: 0, width: width, height: Atlas.S.titlebar))
         y = Atlas.S.titlebar + 18
     }
@@ -76,12 +77,23 @@ final class SettingsWindowController: NSObject {
         checkbox("Read the result back to check it", Prefs.verify, tag: 2)
         y += 8; rule()
 
+        title("Extra protection")
+        checkbox("Duress password with a decoy file", Prefs.duress, tag: 4)
+        checkbox("Several passwords, held by different people", Prefs.quorum, tag: 5)
+        quorum.segments = Prefs.quorumPresets.map { "\($0.threshold) of \($0.holders)" }
+        quorum.selected = Prefs.quorumPreset
+        quorum.target = self; quorum.action = #selector(quorumChanged)
+        add(quorum, NSRect(x: P + 22, y: y + 2, width: W - 22, height: 26)); y += 34
+        checkbox("Separate key file", Prefs.keyFile, tag: 6)
+        para("All off unless you turn them on. They apply to files you embalm from then on. Help, Embalm Instructions explains each.")
+        y += 6; rule()
+
         title("When finished")
         checkbox("Show the new file in Finder", Prefs.reveal, tag: 3)
         y += 10
 
         let note = AtlasLabel(); note.style = Atlas.T.inspectorNote; note.color = Atlas.C.g444
-        note.text = "Kept on this Mac only. The right-click actions in Finder always use the standard settings."
+        note.text = "Kept on this Mac only. The right-click actions in Finder open this app, so they use these settings too."
         let nh = note.height(forWidth: W - 2 * 4) + 22
         let strip = FlippedView(); strip.wantsLayer = true
         strip.layer?.backgroundColor = Atlas.C.note.cgColor
@@ -93,12 +105,21 @@ final class SettingsWindowController: NSObject {
 
     @objc private func attemptsChanged() { Prefs.maxFailures = attemptValues[attempts.selected] }
     @objc private func strengthChanged() { Prefs.strongKDF = strength.selected == 1 }
+    @objc private func quorumChanged() { Prefs.quorumPreset = quorum.selected }
     @objc private func toggled(_ sender: AtlasCheckbox) {
         switch sender.tag {
         case 0: Prefs.padding = sender.isChecked
         case 1: Prefs.storeName = sender.isChecked
         case 2: Prefs.verify = sender.isChecked
-        default: Prefs.reveal = sender.isChecked
+        case 3: Prefs.reveal = sender.isChecked
+        case 4, 5:
+            // A duress password and several passwords cannot be combined: one switches the other off.
+            if sender.tag == 4 { Prefs.duress = sender.isChecked } else { Prefs.quorum = sender.isChecked }
+            if sender.isChecked {
+                if sender.tag == 4 { Prefs.quorum = false } else { Prefs.duress = false }
+                boxes.first { $0.tag == (sender.tag == 4 ? 5 : 4) }?.isChecked = false
+            }
+        default: Prefs.keyFile = sender.isChecked
         }
     }
 

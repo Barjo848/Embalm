@@ -3,7 +3,9 @@ dist/
 dist-repro/
 .build/
 .swiftpm/
+*.emb
 *.embalm
+*.embkey
 .DS_Store
 DerivedData/
 release/private-scan.local

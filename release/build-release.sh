@@ -1,25 +1,32 @@
 #!/bin/bash
 # Builds the anonymized release package for an Apple Silicon Mac.
 #
-#   bash release/build-release.sh [--repro]
+#   bash release/build-release.sh [--repro] [--public]
 #
 # Output (in ./dist):
 #   Embalm-Setup.zip     the package to transfer
 #   RELEASE-INFO.txt     fingerprints and the one command to run on the target Mac
 #
 # --repro builds a second time from scratch and checks the two zips are identical.
+# --public makes a package that may be shared: it bundles only the freely licensed
+#          typeface (TeX Gyre Heros) and leaves the commercial one out.
 set -euo pipefail
 export TZ=UTC LC_ALL=C SOURCE_DATE_EPOCH=946684800 COPYFILE_DISABLE=1
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRIPLE=arm64-apple-macosx12.0
 FIXED_TOUCH=200001010000
+REPRO=0; PUBLIC=0
+for a in "$@"; do
+    case "$a" in --repro) REPRO=1 ;; --public) PUBLIC=1 ;; *) echo "unknown option: $a"; exit 64 ;; esac
+done
+FONT_FILES="TeXGyreHeros-Regular.otf TeXGyreHeros-Bold.otf"
+[ "$PUBLIC" -eq 1 ] || FONT_FILES="$FONT_FILES CourierCode-Roman.ttf"
 FONTS=1
-for f in TeXGyreHeros-Regular.otf TeXGyreHeros-Bold.otf CourierCode-Roman.ttf; do
+for f in $FONT_FILES; do
     [ -f "$REPO/release/fonts/$f" ] || FONTS=0
 done
 [ "$FONTS" -eq 1 ] || echo "note: release/fonts is incomplete, so this build uses system typefaces (see release/fetch-fonts.sh)"
-REPRO=0; [ "${1:-}" = "--repro" ] && REPRO=1
 
 build_package() {   # $1 = output directory
     # Work outside the repository: a synced folder (iCloud Drive, Dropbox) puts
@@ -42,10 +49,9 @@ build_package() {   # $1 = output directory
     }
     cd "$REPO"
     build_product EmbalmGUI
-    build_product embalm
     local BINDIR
     BINDIR="$(swift build -c release --triple "$TRIPLE" --scratch-path "$WORK/build" --show-bin-path)"
-    [ -x "$BINDIR/EmbalmGUI" ] && [ -x "$BINDIR/embalm" ] || { echo "build failed"; exit 1; }
+    [ -x "$BINDIR/EmbalmGUI" ] || { echo "build failed"; exit 1; }
 
     finalize_binary() {   # remove toolchain traces, then strip
         local src="$1" dst="$2" rp
@@ -64,7 +70,7 @@ build_package() {   # $1 = output directory
     cp "$REPO/release/Info.plist" "$APP/Contents/Info.plist"
     if [ "$FONTS" -eq 1 ]; then
         mkdir -p "$APP/Contents/Resources/Fonts"
-        cp "$REPO/release/fonts/"*.otf "$REPO/release/fonts/"*.ttf "$APP/Contents/Resources/Fonts/"
+        for f in $FONT_FILES; do cp "$REPO/release/fonts/$f" "$APP/Contents/Resources/Fonts/"; done
     fi
 
     swiftc -O "$REPO/app/icon-gen.swift" -o "$WORK/icon-gen" 2>/dev/null
@@ -84,14 +90,11 @@ build_package() {   # $1 = output directory
     echo "==> Signing (ad hoc, hardened runtime, sandbox entitlements)…"
     codesign --force --options runtime --timestamp=none \
         --entitlements "$REPO/release/Embalm.entitlements" --sign - "$APP" 2>&1 | grep -v "replacing existing" || true
-    finalize_binary "$BINDIR/embalm" "$STAGE/embalm"
-    codesign --force --options runtime --timestamp=none --identifier com.embalm.cli --sign - "$STAGE/embalm" 2>&1 | grep -v "replacing existing" || true
-    codesign --verify --strict "$APP" && codesign --verify --strict "$STAGE/embalm" || { echo "signing failed"; exit 1; }
+    codesign --verify --strict "$APP" || { echo "signing failed"; exit 1; }
     codesign -d --entitlements - "$APP" 2>/dev/null | grep -q "com.apple.security.app-sandbox" || { echo "signing failed: sandbox entitlement missing"; exit 1; }
 
     cp "$REPO/release/setup.sh" "$STAGE/setup.sh"
-    cp "$REPO/integration/scripts/embalm-seal.sh" "$REPO/integration/scripts/embalm-open.sh" \
-       "$REPO/release/support/quickaction.sh" "$STAGE/support/"
+    cp "$REPO/release/support/quickaction.sh" "$STAGE/support/"
     cat > "$STAGE/README.txt" <<'TXT'
 Embalm
 
@@ -110,7 +113,7 @@ TXT
     xattr -cr "$STAGE" 2>/dev/null || true
     find "$STAGE" -type d -exec chmod 755 {} +
     find "$STAGE" -type f -exec chmod 644 {} +
-    chmod 755 "$APP/Contents/MacOS/Embalm" "$STAGE/embalm" "$STAGE/setup.sh" "$STAGE"/support/*.sh
+    chmod 755 "$APP/Contents/MacOS/Embalm" "$STAGE/setup.sh" "$STAGE"/support/*.sh
     ( cd "$STAGE"
       find . -type f ! -name SHA256SUMS | LC_ALL=C sort | sed 's|^\./||' | while IFS= read -r f; do shasum -a 256 "$f"; done > SHA256SUMS
       chmod 644 SHA256SUMS )

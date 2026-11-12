@@ -77,11 +77,15 @@ enum Atlas {
 
     private(set) static var fontsLoaded = false
 
-    /// True when the build carries a Fonts folder. The typefaces are not in the
-    /// repository, so a build from a plain checkout has none and uses system faces.
-    static var fontsBundled: Bool {
-        guard let dir = Bundle.main.resourceURL?.appendingPathComponent("Fonts") else { return false }
-        return FileManager.default.fileExists(atPath: dir.path)
+    private static let fontFiles = [(heros, "TeXGyreHeros-Regular.otf"), (herosBold, "TeXGyreHeros-Bold.otf"),
+                                    (mono, "CourierCode-Roman.ttf")]
+
+    /// The faces this build carries. The typefaces are not in the repository: a build
+    /// from a plain checkout has none, and a build meant for sharing leaves out the
+    /// commercial one. Whatever is missing falls back to a system face.
+    static var bundledFaces: [String] {
+        guard let dir = Bundle.main.resourceURL?.appendingPathComponent("Fonts") else { return [] }
+        return fontFiles.filter { FileManager.default.fileExists(atPath: dir.appendingPathComponent($0.1).path) }.map { $0.0 }
     }
 
     /// Registers the three bundled faces and confirms each resolves by name.
@@ -90,7 +94,7 @@ enum Atlas {
     @discardableResult
     static func registerFonts() -> Bool {
         if let dir = Bundle.main.resourceURL?.appendingPathComponent("Fonts") {
-            for f in ["TeXGyreHeros-Regular.otf", "TeXGyreHeros-Bold.otf", "CourierCode-Roman.ttf"] {
+            for (_, f) in fontFiles {
                 CTFontManagerRegisterFontsForURL(dir.appendingPathComponent(f) as CFURL, .process, nil)
             }
         }
@@ -197,7 +201,7 @@ final class AtlasLabel: NSTextField {
 final class TitleBarView: FlippedView {
     var k: CGFloat = 1 { didSet { needsDisplay = true } }
     var title = "Embalm" { didSet { needsDisplay = true } }
-    var version = "v1.0.0" { didSet { needsDisplay = true } }
+    var version = "v1.3.0" { didSet { needsDisplay = true } }
 
     override func draw(_ dirtyRect: NSRect) {
         Atlas.C.ink.setFill(); bounds.fill()
@@ -454,6 +458,69 @@ final class AtlasSegmented: NSControl {
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .radioGroup }
     override func accessibilityValue() -> Any? { segments.indices.contains(selected) ? segments[selected] : nil }
+}
+
+// MARK: - Slider and plain box (derived: Atlas defines neither)
+
+/// A whole-number slider: a 2px rule, black up to a black thumb.
+final class AtlasSlider: NSControl {
+    var k: CGFloat = 1 { didSet { needsDisplay = true } }
+    var range: ClosedRange<Int> = 0...1 { didSet { value = min(max(value, range.lowerBound), range.upperBound) } }
+    var value = 0 { didSet { needsDisplay = true } }
+    private var focused = false { didSet { needsDisplay = true } }
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool { focused = NSApp.currentEvent?.type != .leftMouseDown; return true }
+    override func resignFirstResponder() -> Bool { focused = false; return true }
+
+    private var thumbWidth: CGFloat { 12 * k }
+    private var track: NSRect { NSRect(x: thumbWidth / 2, y: bounds.midY - k, width: bounds.width - thumbWidth, height: 2 * k) }
+    private var thumb: NSRect {
+        let f = CGFloat(value - range.lowerBound) / CGFloat(max(1, range.upperBound - range.lowerBound))
+        return NSRect(x: track.minX + f * track.width - thumbWidth / 2, y: bounds.midY - 9 * k, width: thumbWidth, height: 18 * k)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let t = track, th = thumb
+        Atlas.C.mid.setFill(); t.fill()
+        Atlas.C.ink.setFill()
+        NSRect(x: t.minX, y: t.minY, width: th.midX - t.minX, height: t.height).fill()
+        th.fill()
+        if focused { Atlas.drawFocusRing(around: th, k: k) }
+    }
+    private func track(_ event: NSEvent) {
+        let x = convert(event.locationInWindow, from: nil).x
+        let f = max(0, min(1, (x - track.minX) / max(1, track.width)))
+        change(to: range.lowerBound + Int((f * CGFloat(range.upperBound - range.lowerBound)).rounded()))
+    }
+    private func change(to v: Int) {
+        let c = min(max(v, range.lowerBound), range.upperBound)
+        guard c != value else { return }
+        value = c
+        sendAction(action, to: target)
+    }
+    override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self); track(event) }
+    override func mouseDragged(with event: NSEvent) { track(event) }
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 123, 125: change(to: value - 1)     // left, down
+        case 124, 126: change(to: value + 1)     // right, up
+        default: super.keyDown(with: event)
+        }
+    }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .slider }
+    override func accessibilityValue() -> Any? { value }
+}
+
+/// A white surface with the 1px hard border.
+final class BoxView: FlippedView {
+    override func draw(_ dirtyRect: NSRect) {
+        Atlas.C.white.setFill(); bounds.fill()
+        Atlas.C.line.setStroke()
+        let b = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5)); b.lineWidth = 1; b.stroke()
+    }
 }
 
 // MARK: - Password guidance

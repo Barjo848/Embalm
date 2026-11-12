@@ -12,6 +12,12 @@ public enum EmbalmEngine {
 
     public static let chunkSize = 1 << Int(EmbalmFormat.defaultChunkLog2)
 
+    /// The extension given to new embalmed files. Files are recognised by content,
+    /// so the name is a convenience for Finder, never a requirement.
+    public static let fileExtension = "emb"
+    /// Extensions used by earlier versions, still treated as embalmed files.
+    public static let legacyExtensions = ["embalm"]
+
     // MARK: - Status
 
     public struct Status {
@@ -24,6 +30,12 @@ public enum EmbalmEngine {
         public let structurallyIntact: Bool
         public let problem: String?
         public let exposesLegacyFingerprint: Bool
+        /// True for a file whose key block lives in a separate key file that has
+        /// not been supplied yet. The attempt counts are unknown until it is.
+        public var needsKeyFile = false
+        /// How many different passwords are needed, out of how many issued.
+        public var threshold = 1
+        public var holders = 1
         public var remainingAttempts: Int { max(0, maxFailures - failureCount) }
         public var isDestroyed: Bool { failureCount >= maxFailures }
     }
@@ -37,7 +49,8 @@ public enum EmbalmEngine {
     }
 
     /// Read a container's state without a password and without using an attempt.
-    public static func inspect(input: URL) throws -> Status {
+    public static func inspect(input: URL, keyFile: URL? = nil) throws -> Status {
+        if formatVersion(of: input) == EmbalmFormat.V4.version { return try inspectV4(input: input, keyFile: keyFile) }
         let h: FileHandle
         do { h = try FileHandle(forReadingFrom: input) }
         catch { throw EmbalmError.io("cannot read \(input.lastPathComponent)") }
@@ -102,143 +115,11 @@ public enum EmbalmEngine {
         return candidate
     }
 
-    // MARK: - Embalm (encrypt)
-
-    public static func embalm(
-        input: URL, output: URL, password: String,
-        kdf: KDFChoice = .defaultArgon2id, maxFailures: UInt8 = 2,
-        padding: Bool = true, storeName: Bool = true, verify: Bool = true,
-        progress: ((Double) -> Void)? = nil
-    ) throws {
-        if input.standardizedFileURL.path == output.standardizedFileURL.path {
-            throw EmbalmError.io("input and output are the same file")
-        }
-        let inHandle: FileHandle
-        do { inHandle = try FileHandle(forReadingFrom: input) }
-        catch { throw EmbalmError.io("cannot read \(input.lastPathComponent)") }
-        defer { try? inHandle.close() }
-
-        var st = stat()
-        guard fstat(inHandle.fileDescriptor, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else {
-            throw EmbalmError.io("\(input.lastPathComponent) is not a regular file (zip a folder first)")
-        }
-        let dataLen = UInt64(st.st_size)
-
-        // Inner envelope header.
-        let name = storeName ? (sanitizedFilename(input.lastPathComponent) ?? "") : ""
-        let nameBytes = Array(name.utf8)
-        var innerHead = Data([1, 0])
-        innerHead.appendBigEndian(UInt16(nameBytes.count))
-        innerHead.append(contentsOf: nameBytes)
-        innerHead.appendBigEndian(dataLen)
-
-        let innerLen = UInt64(innerHead.count) + dataLen
-        let padded = padding ? Padding.paddedLength(innerLen) : innerLen
-        let C = UInt64(chunkSize)
-        let n = (padded + C - 1) / C
-        let payloadLen = padded + 16 * n
-
-        // Keys: random DEK wrapped under the password-derived key, bound to the header.
-        let dek = SymmetricKey(size: .bits256)
-        let dekData = dek.withUnsafeBytes { Data($0) }
-        let salt = RandomBytes.makeData(EmbalmFormat.saltLength)
-        let wrapNonce = RandomBytes.makeData(EmbalmFormat.nonceLength)
-        let prefix = RandomBytes.makeData(EmbalmFormat.noncePrefixLength)
-        let parts = EmbalmHeader.v3Parts(
-            kdfId: kdf.kdfId, paramWord: kdf.paramWord, maxFailures: maxFailures,
-            salt: salt, wrapNonce: wrapNonce, noncePrefix: prefix,
-            chunkLog2: EmbalmFormat.defaultChunkLog2)
-        let kek = SymmetricKey(data: try kdf.deriveKey(password: password, salt: salt, normalize: true))
-        let sealedDEK = try AES.GCM.seal(dekData, using: kek,
-                                         nonce: AES.GCM.Nonce(data: wrapNonce),
-                                         authenticating: parts.head + parts.tail)
-        let wrapped = sealedDEK.ciphertext + sealedDEK.tag
-
-        var headerBytes = parts.head + wrapped + parts.tail
-        headerBytes.appendBigEndian(CRC32.checksum([UInt8](headerBytes)))
-        headerBytes.appendBigEndian(payloadLen)
-        precondition(headerBytes.count == EmbalmFormat.v3HeaderLength)
-
-        // Create the output (private permissions) and stream the chunks.
-        guard FileManager.default.createFile(atPath: output.path, contents: nil,
-                                             attributes: [.posixPermissions: 0o600]) else {
-            throw EmbalmError.io("cannot create \(output.lastPathComponent)")
-        }
-        let out: FileHandle
-        do { out = try FileHandle(forWritingTo: output) }
-        catch { try? FileManager.default.removeItem(at: output); throw EmbalmError.io("cannot write \(output.lastPathComponent)") }
-        var finished = false
-        defer { try? out.close(); if !finished { try? FileManager.default.removeItem(at: output) } }
-
-        try out.write(contentsOf: headerBytes)
-
-        var sha = SHA256()
-        var consumed: UInt64 = 0
-        var headPos = 0
-        for i in 0..<Int(n) {
-            let want = Int(min(C, padded - UInt64(i) * C))
-            var buf = Data(capacity: want)
-            if headPos < innerHead.count {
-                let take = min(innerHead.count - headPos, want)
-                buf.append(innerHead[(innerHead.startIndex + headPos)..<(innerHead.startIndex + headPos + take)])
-                headPos += take
-            }
-            if buf.count < want && consumed < dataLen {
-                let need = Int(min(UInt64(want - buf.count), dataLen - consumed))
-                let piece = try readExactly(inHandle, need)
-                sha.update(data: piece)
-                consumed += UInt64(piece.count)
-                buf.append(piece)
-            }
-            if buf.count < want { buf.append(Data(count: want - buf.count)) }
-            let box = try AES.GCM.seal(buf, using: dek,
-                                       nonce: chunkNonce(prefix: prefix, index: UInt32(i), final: i == Int(n) - 1))
-            try out.write(contentsOf: box.ciphertext + box.tag)
-            progress?(verify ? 0.5 * Double(i + 1) / Double(n) : Double(i + 1) / Double(n))
-        }
-        guard consumed == dataLen else { throw EmbalmError.io("\(input.lastPathComponent) changed while it was being embalmed") }
-        SecureErase.fullSync(out)
-
-        // Read the output back and compare, so a bad disk or a bug cannot produce
-        // an embalmed file that fails to open later.
-        if verify {
-            let expected = Data(sha.finalize())
-            let rh: FileHandle
-            do { rh = try FileHandle(forReadingFrom: output) } catch { throw EmbalmError.integrityCheckFailed }
-            defer { try? rh.close() }
-            let size = try rh.seekToEnd()
-            try rh.seek(toOffset: 0)
-            let reparsed = try EmbalmHeader.parse(try readExactly(rh, EmbalmFormat.v3HeaderLength))
-            guard size == UInt64(EmbalmFormat.v3HeaderLength) + payloadLen, reparsed.crcOK else {
-                throw EmbalmError.integrityCheckFailed
-            }
-            let stream = try V3Stream(handle: rh, header: reparsed, dek: dek)
-            var check = SHA256()
-            let first = try stream.decryptChunk(0)
-            let inner = try parseInner(first, totalPlain: stream.totalPlain)
-            guard inner.dataLen == dataLen, inner.name == (name.isEmpty ? nil : name) else { throw EmbalmError.integrityCheckFailed }
-            let firstData = first.subdata(in: inner.headEnd..<min(first.count, inner.headEnd + Int(min(inner.dataLen, UInt64(first.count - inner.headEnd)))))
-            check.update(data: firstData)
-            var remaining = dataLen - UInt64(firstData.count)
-            for i in 1..<max(1, stream.n) {
-                let c = try stream.decryptChunk(i)
-                let take = Int(min(remaining, UInt64(c.count)))
-                if take > 0 { check.update(data: c.prefix(take)) }
-                remaining -= UInt64(take)
-                progress?(0.5 + 0.5 * Double(i + 1) / Double(n))
-            }
-            guard remaining == 0, Data(check.finalize()) == expected else { throw EmbalmError.integrityCheckFailed }
-        }
-        progress?(1)
-        finished = true
-    }
-
     // MARK: - Mummify (decrypt)
 
-    /// Step 1 of mummifying: check the password and open the container. A wrong
-    /// password updates the on-disk attempt counter and, on the last allowed miss,
-    /// shreds the container. Nothing is written until `OpenedContainer.write`.
-    public static func unlock(input: URL, password: String) throws -> OpenedContainer {
+    /// Opens a v1 to v3 container. A wrong password updates the on-disk attempt
+    /// counter and, on the last allowed miss, shreds the container.
+    static func legacyUnlock(input: URL, password: String) throws -> OpenedContainer {
         let handle: FileHandle
         do { handle = try FileHandle(forUpdating: input) }
         catch {
@@ -306,18 +187,18 @@ public enum EmbalmEngine {
     }
 
     /// Unlock and write in one step to an explicit path.
-    public static func mummify(input: URL, output: URL, password: String, overwrite: Bool = false,
-                               progress: ((Double) -> Void)? = nil) throws {
-        let opened = try unlock(input: input, password: password)
+    public static func mummify(input: URL, output: URL, password: String, keyFile: URL? = nil,
+                               overwrite: Bool = false, progress: ((Double) -> Void)? = nil) throws {
+        let opened = try unlock(input: input, password: password, keyFile: keyFile)
         defer { opened.close() }
         try opened.write(to: output, overwrite: overwrite, progress: progress)
     }
 
     /// Where a mummified file should go by default: the embedded name if there is
-    /// one, otherwise the container's name without `.embalm`.
+    /// one, otherwise the container's name without `.emb` (or the older `.embalm`).
     public static func suggestedOutputName(opened: OpenedContainer, inputName: String) -> String {
         if let n = opened.originalName { return n }
-        if (inputName as NSString).pathExtension.lowercased() == "embalm" {
+        if ([fileExtension] + legacyExtensions).contains((inputName as NSString).pathExtension.lowercased()) {
             let stem = (inputName as NSString).deletingPathExtension
             if !stem.isEmpty { return stem }
         }
@@ -326,7 +207,7 @@ public enum EmbalmEngine {
 
     // MARK: - Internals
 
-    fileprivate static func chunkNonce(prefix: Data, index: UInt32, final: Bool) throws -> AES.GCM.Nonce {
+    static func chunkNonce(prefix: Data, index: UInt32, final: Bool) throws -> AES.GCM.Nonce {
         var b = [UInt8](prefix)
         b.append(UInt8(truncatingIfNeeded: index >> 24))
         b.append(UInt8(truncatingIfNeeded: index >> 16))
@@ -336,7 +217,7 @@ public enum EmbalmEngine {
         return try AES.GCM.Nonce(data: b)
     }
 
-    fileprivate static func readExactly(_ h: FileHandle, _ count: Int) throws -> Data {
+    static func readExactly(_ h: FileHandle, _ count: Int) throws -> Data {
         var out = Data(capacity: count)
         while out.count < count {
             guard let piece = try h.read(upToCount: count - out.count), !piece.isEmpty else {
@@ -347,7 +228,7 @@ public enum EmbalmEngine {
         return out
     }
 
-    fileprivate static func parseInner(_ chunk0: Data, totalPlain: UInt64) throws
+    static func parseInner(_ chunk0: Data, totalPlain: UInt64) throws
         -> (name: String?, dataLen: UInt64, headEnd: Int) {
         let b = [UInt8](chunk0)
         guard b.count >= 12, b[0] == 1 else { throw EmbalmError.integrityCheckFailed }
@@ -360,7 +241,7 @@ public enum EmbalmEngine {
         return (name, dataLen, headEnd)
     }
 
-    private static func writeByte(_ h: FileHandle, _ offset: Int, _ value: UInt8) throws {
+    static func writeByte(_ h: FileHandle, _ offset: Int, _ value: UInt8) throws {
         try h.seek(toOffset: UInt64(offset))
         try h.write(contentsOf: Data([value]))
         SecureErase.fullSync(h)
@@ -386,10 +267,11 @@ public enum EmbalmEngine {
         try writeByte(handle, EmbalmFormat.offFailureCount, header.maxFailures)
     }
 
-    /// Geometry and decryption of a v3 payload.
+    /// Geometry and decryption of a chunked payload (v3 and later).
     struct V3Stream {
         let handle: FileHandle
-        let header: EmbalmHeader
+        let offset: UInt64
+        let prefix: Data
         let dek: SymmetricKey
         let n: Int
         let unit: Int            // ciphertext bytes in a full chunk
@@ -397,26 +279,32 @@ public enum EmbalmEngine {
         let totalPlain: UInt64
 
         init(handle: FileHandle, header: EmbalmHeader, dek: SymmetricKey) throws {
-            guard (10...24).contains(header.chunkLog2) else { throw EmbalmError.damaged("invalid chunk size") }
-            let unit = (1 << Int(header.chunkLog2)) + 16
-            let n = (header.payloadLen + UInt64(unit) - 1) / UInt64(unit)
-            let last = header.payloadLen &- (n &- 1) &* UInt64(unit)
+            try self.init(handle: handle, offset: UInt64(header.payloadOffset), payloadLen: header.payloadLen,
+                          prefix: header.noncePrefix, chunkLog2: header.chunkLog2, dek: dek)
+        }
+
+        init(handle: FileHandle, offset: UInt64, payloadLen: UInt64, prefix: Data, chunkLog2: UInt8,
+             dek: SymmetricKey) throws {
+            guard (10...24).contains(chunkLog2) else { throw EmbalmError.damaged("invalid chunk size") }
+            let unit = (1 << Int(chunkLog2)) + 16
+            let n = (payloadLen + UInt64(unit) - 1) / UInt64(unit)
+            let last = payloadLen &- (n &- 1) &* UInt64(unit)
             guard n >= 1, n <= UInt64(UInt32.max), last >= 17, last <= UInt64(unit) else {
                 throw EmbalmError.damaged("invalid payload length")
             }
-            self.handle = handle; self.header = header; self.dek = dek
+            self.handle = handle; self.offset = offset; self.prefix = prefix; self.dek = dek
             self.n = Int(n); self.unit = unit; self.lastLen = Int(last)
-            self.totalPlain = header.payloadLen - 16 * n
+            self.totalPlain = payloadLen - 16 * n
         }
 
         func decryptChunk(_ i: Int) throws -> Data {
             let isLast = i == n - 1
             let len = isLast ? lastLen : unit
-            try handle.seek(toOffset: UInt64(header.payloadOffset) + UInt64(i) * UInt64(unit))
+            try handle.seek(toOffset: offset + UInt64(i) * UInt64(unit))
             let raw = try EmbalmEngine.readExactly(handle, len)
             do {
                 let box = try AES.GCM.SealedBox(
-                    nonce: EmbalmEngine.chunkNonce(prefix: header.noncePrefix, index: UInt32(i), final: isLast),
+                    nonce: EmbalmEngine.chunkNonce(prefix: prefix, index: UInt32(i), final: isLast),
                     ciphertext: raw.prefix(len - 16), tag: raw.suffix(16))
                 return try AES.GCM.open(box, using: dek)
             } catch { throw EmbalmError.integrityCheckFailed }
@@ -431,14 +319,14 @@ public enum EmbalmEngine {
             case legacy(Data)
             case stream(V3Stream, firstData: Data)
         }
-        /// The original file name, restored from inside the encrypted data (v3 only).
+        /// The original file name, restored from inside the encrypted data (v3 and later).
         public let originalName: String?
         public let dataSize: UInt64
         public let formatVersion: Int
         private let source: Source
         private var closed = false
 
-        fileprivate init(version: Int, name: String?, dataSize: UInt64, source: Source) {
+        init(version: Int, name: String?, dataSize: UInt64, source: Source) {
             self.formatVersion = version; self.originalName = name
             self.dataSize = dataSize; self.source = source
         }

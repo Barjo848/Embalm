@@ -37,6 +37,8 @@ func exitCode(for error: EmbalmError) -> Exit {
     case .integrityCheckFailed: return .integrity
     case .readOnlySource: return .readOnly
     case .io: return .io
+    case .keyFileNeeded, .keyFileMismatch, .notAKeyFile, .morePasswordsNeeded, .passwordAlreadyGiven,
+         .decoyTooLarge, .invalidOptions: return .usage
     }
 }
 
@@ -48,6 +50,7 @@ struct Options {
     var iterations: UInt32 = KDF.defaultIterations
     var padding = true, storeName = true, verify = true
     var force = false, porcelain = false
+    var keyFile: URL?
 }
 
 func parseOptions(_ args: [String], _ command: String) -> Options {
@@ -64,6 +67,7 @@ func parseOptions(_ args: [String], _ command: String) -> Options {
         switch a {
         case "--out", "-o": o.output = URL(fileURLWithPath: value(a))
         case "--password-stdin": o.passwordStdin = true
+        case "--key-file": o.keyFile = URL(fileURLWithPath: value(a))
         case "--force", "-f": o.force = true
         case "--porcelain": o.porcelain = true
         case "--no-padding": o.padding = false
@@ -117,7 +121,7 @@ func runSeal(_ args: [String]) {
     let o = parseOptions(args, "seal")
     requireExistingFile(o.input)
     let dir = o.input.deletingLastPathComponent()
-    let output = o.output ?? EmbalmEngine.uniqueURL(directory: dir, name: o.input.lastPathComponent + ".embalm")
+    let output = o.output ?? EmbalmEngine.uniqueURL(directory: dir, name: o.input.lastPathComponent + "." + EmbalmEngine.fileExtension)
     if o.output != nil, FileManager.default.fileExists(atPath: output.path), !o.force {
         fail("\(output.lastPathComponent) already exists (use --force to overwrite)", .exists)
     }
@@ -139,9 +143,30 @@ func runOpen(_ args: [String]) {
     if let out = o.output, FileManager.default.fileExists(atPath: out.path), !o.force {
         fail("\(out.lastPathComponent) already exists (use --force to overwrite)", .exists)
     }
-    let pw = password(o, confirming: false)
     do {
-        let opened = try EmbalmEngine.unlock(input: o.input, password: pw)
+        // A file that needs several passwords takes them one per line (or prompt).
+        let session = try EmbalmEngine.beginOpen(input: o.input, keyFile: o.keyFile)
+        defer { session.close() }
+        var lines: [String] = []
+        if o.passwordStdin {
+            lines = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
+                .split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        }
+        var found: EmbalmEngine.OpenedContainer?
+        while found == nil {
+            let pw: String
+            if o.passwordStdin {
+                guard !lines.isEmpty else { fail("\(session.threshold - session.accepted) more password(s) needed", .usage) }
+                pw = lines.removeFirst()
+            } else {
+                pw = password(o, confirming: false)
+            }
+            found = try session.offer(password: pw)
+            if found == nil, !o.passwordStdin {
+                FileHandle.standardError.write(Data("Accepted. \(session.threshold - session.accepted) more needed.\n".utf8))
+            }
+        }
+        guard let opened = found else { fail("could not open", .other) }
         defer { opened.close() }
         let output = o.output ?? EmbalmEngine.uniqueURL(
             directory: o.input.deletingLastPathComponent(),
@@ -157,8 +182,14 @@ func runInfo(_ args: [String]) {
     let o = parseOptions(args, "info")
     requireExistingFile(o.input)
     do {
-        let s = try EmbalmEngine.inspect(input: o.input)
+        let s = try EmbalmEngine.inspect(input: o.input, keyFile: o.keyFile)
         print("Embalm container: \(o.input.lastPathComponent)")
+        if s.needsKeyFile {
+            print("  format version:     \(s.formatVersion)")
+            print("  key file:           needed (pass --key-file PATH); nothing more can be read without it")
+            return
+        }
+        if s.holders > 1 { print("  passwords needed:   \(s.threshold) of \(s.holders)") }
         print("  format version:     \(s.formatVersion)")
         print("  key derivation:     \(s.kdfName)")
         print("  file size:          \(s.fileSize) bytes")
@@ -193,13 +224,15 @@ func usage() -> Never {
       embalm seal <file>  [--out PATH] [--password-stdin] [--kdf argon2id|pbkdf2]
                           [--iterations N] [--no-padding] [--no-name] [--no-verify]
                           [--force] [--porcelain]
-      embalm open <file>  [--out PATH] [--password-stdin] [--force] [--porcelain]
-      embalm info <file>
+      embalm open <file>  [--out PATH] [--key-file PATH] [--password-stdin] [--force] [--porcelain]
+      embalm info <file>  [--key-file PATH]
       embalm selfcheck
 
     NOTES:
+      * Duress passwords, several passwords and key files are set up in the app.
+        This tool opens such files: several passwords are asked for one at a time.
       * Files are recognised by their content, so a renamed or re-downloaded
-        .embalm file still opens, and its original name is restored.
+        .emb file still opens, and its original name is restored.
       * Existing files are never overwritten unless you pass --force.
       * Two wrong passwords in a row destroy the file permanently.
       * Passwords come from the terminal (no echo) or stdin, never from arguments.

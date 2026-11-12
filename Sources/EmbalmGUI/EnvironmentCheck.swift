@@ -70,16 +70,17 @@ enum EnvironmentCheck {
         record("The app cannot read your Desktop, Documents, Downloads or keys", readable.isEmpty,
                readable.isEmpty ? "all refused" : "readable: \(readable.joined(separator: ", "))")
 
-        // 5. Typefaces. If this build bundles them, each must load by name (a system
-        //    fallback is then a failure). A build without them uses system faces.
-        if Atlas.fontsBundled {
-            let missing = [Atlas.heros, Atlas.herosBold, Atlas.mono].filter { NSFont(name: $0, size: 12) == nil }
-            report(CheckResult(group: "This app's sandbox", name: "The three bundled typefaces load by name",
-                               passed: missing.isEmpty, detail: missing.isEmpty ? "Heros, Heros Bold, Courier Code" : "missing: \(missing.joined(separator: ", "))"))
-            if !missing.isEmpty { ok = false }
-        } else {
+        // 5. Typefaces. Each one this build bundles must load by name (a system
+        //    fallback for a bundled face is a failure). Faces it leaves out use system ones.
+        let bundled = Atlas.bundledFaces
+        if bundled.isEmpty {
             report(CheckResult(group: "This app's sandbox", name: "Typefaces: none bundled, system faces in use",
                                passed: true, detail: "Helvetica and the system monospace"))
+        } else {
+            let missing = bundled.filter { NSFont(name: $0, size: 12) == nil }
+            report(CheckResult(group: "This app's sandbox", name: "The bundled typefaces load by name",
+                               passed: missing.isEmpty, detail: missing.isEmpty ? "\(bundled.count) of 3 bundled" : "missing: \(missing.joined(separator: ", "))"))
+            if !missing.isEmpty { ok = false }
         }
 
         // 6. It can still work in its own private space.

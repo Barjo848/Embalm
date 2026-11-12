@@ -24,6 +24,20 @@ public enum EmbalmError: Error, Equatable {
     case readOnlySource
     /// Filesystem trouble.
     case io(String)
+    /// This file's key block is in a separate key file, which was not supplied.
+    case keyFileNeeded
+    /// The key file supplied belongs to a different embalmed file.
+    case keyFileMismatch
+    /// The file offered as a key file is not one.
+    case notAKeyFile
+    /// The password was right, and this many more different passwords are needed.
+    case morePasswordsNeeded(Int)
+    /// This person's password was already accepted for this opening.
+    case passwordAlreadyGiven
+    /// The decoy file is larger than the space every file reserves for one.
+    case decoyTooLarge
+    /// The options chosen for embalming cannot be combined or are incomplete.
+    case invalidOptions(String)
 }
 
 extension EmbalmError: CustomStringConvertible {
@@ -51,6 +65,20 @@ extension EmbalmError: CustomStringConvertible {
             return "This file is on read-only storage, so the attempt limit cannot be enforced. Copy it to your Mac first, then open the copy."
         case .io(let msg):
             return "Filesystem error: \(msg)."
+        case .keyFileNeeded:
+            return "This file was embalmed with a separate key file. Choose its key file to continue."
+        case .keyFileMismatch:
+            return "That key file belongs to a different embalmed file. No password attempt was used."
+        case .notAKeyFile:
+            return "That is not an Embalm key file."
+        case .morePasswordsNeeded(let n):
+            return "Password accepted. \(n) more password\(n == 1 ? " is" : "s are") needed from other holders."
+        case .passwordAlreadyGiven:
+            return "That password was already accepted. A different holder's password is needed. No attempt was used."
+        case .decoyTooLarge:
+            return "The decoy file is too large. It must be \(EmbalmEngine.maxDecoyBytes / 1000) KB or smaller."
+        case .invalidOptions(let why):
+            return why
         }
     }
 }

@@ -13,7 +13,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run the 36-check suite
+      - name: Run the self-check suite
         run: swift run embalm-selftest
       - name: Build the app and the command-line tool
         run: swift build -c release

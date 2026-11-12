@@ -44,7 +44,7 @@ if [ "$MODE" = uninstall ]; then
            "$SERVICES/Embalm.workflow" "$SERVICES/Mummify.workflow" \
            "$HOME/Library/Containers/com.embalm.Embalm" 2>/dev/null
     [ -z "$TESTING" ] && /System/Library/CoreServices/pbs -flush >/dev/null 2>&1
-    ok "Removed the app, helper tool, Quick Actions and the app's private container"
+    ok "Removed the app, Quick Actions and the app's private container"
     info "Files you embalmed or recovered are yours and were not touched."
     exit 0
 fi
@@ -101,7 +101,7 @@ fi
 if [ "$MODE" = install ]; then
     section "3. Installing"
     xattr -cr "$HERE" 2>/dev/null          # integrity is already proven above
-    chmod 755 "$HERE/embalm" "$HERE"/support/*.sh 2>/dev/null
+    chmod 755 "$HERE"/support/*.sh 2>/dev/null
     if [ -d "$HERE/Embalm.app" ]; then
         quit_running
         DEST="$APPS/Embalm.app"
@@ -114,30 +114,26 @@ if [ "$MODE" = install ]; then
         APP_NOW="$DEST"
         ok "Installed $DEST"
     fi
-    mkdir -p "$SUPPORT" "$SERVICES"
-    install -m 755 "$HERE/embalm" "$SUPPORT/embalm"
-    install -m 755 "$HERE/support/embalm-seal.sh" "$SUPPORT/embalm-seal.sh"
-    install -m 755 "$HERE/support/embalm-open.sh" "$SUPPORT/embalm-open.sh"
-    ok "Installed the command-line helper and Quick Action scripts"
+    mkdir -p "$SERVICES"
+    rm -rf "$SUPPORT"                       # helper files from 1.0, no longer used
     # shellcheck disable=SC1091
     . "$HERE/support/quickaction.sh"
-    make_quick_action "Embalm"  "embalm-seal.sh" "public.zip-archive" "$SERVICES/Embalm.workflow"
-    make_quick_action "Mummify" "embalm-open.sh" "public.data"        "$SERVICES/Mummify.workflow"
-    ok "Added the right-click actions Embalm (zip files) and Mummify (any file)"
+    make_quick_action "Embalm"  "public.data"          "$SERVICES/Embalm.workflow"
+    make_quick_action "Mummify" "com.embalm.container" "$SERVICES/Mummify.workflow"
+    ok "Added the right-click actions Embalm (any file) and Mummify (.emb files)"
     if [ -z "$TESTING" ]; then
         /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_NOW" >/dev/null 2>&1
         /System/Library/CoreServices/pbs -flush >/dev/null 2>&1
-        ok "Registered the app so .embalm files open in it"
+        /System/Library/CoreServices/pbs -update >/dev/null 2>&1
+        ok "Registered the app so .emb files open in it"
     fi
 fi
 [ -n "$APP_NOW" ] || { printf '\nPRIVACY CHECK: FAILED (app not installed)\n'; exit 1; }
 BIN="$APP_NOW/Contents/MacOS/Embalm"
-CLI="$SUPPORT/embalm"; [ -x "$CLI" ] || CLI="$HERE/embalm"
 
 # ---------------------------------------------------------------- 4. signature and permissions
 section "4. Signature and permissions"
 chk "The app's code signature is valid and unmodified" codesign --verify --strict --deep "$APP_NOW"
-chk "The helper tool's code signature is valid" codesign --verify --strict "$CLI"
 SIGINFO="$(codesign -dvv "$APP_NOW" 2>&1)"
 case "$SIGINFO" in *"(runtime)"*|*"runtime"*) ok "Hardened runtime is on" ;; *) bad "Hardened runtime is off" ;; esac
 case "$SIGINFO" in *"Signature=adhoc"*) ok "Signed ad hoc: no Apple ID, developer name or certificate is embedded" ;; *) bad "Unexpected signing identity" ;; esac
@@ -170,8 +166,6 @@ audit() {   # $1 = label, $2 = file
     [ "$net" -eq 0 ] && ok "$label references no networking API"
 }
 audit "The app" "$BIN"
-audit "The helper tool" "$CLI"
-has "$CLI" "_socket" && bad "The helper tool references raw sockets" || ok "The helper tool has no socket calls at all"
 if has "$BIN" "_socket" && has "$BIN" "_connect"; then
     ok "The app's only socket calls belong to its self-check"
     info "It tries to open a connection to prove the sandbox refuses it (see section 6)."
@@ -189,8 +183,6 @@ if [ "$SC_CODE" -eq 0 ]; then
 else
     bad "The app's own checks failed (see above)"
 fi
-CC="$("$CLI" selfcheck 2>&1)"; CC_CODE=$?
-[ "$CC_CODE" -eq 0 ] && ok "The helper tool's cryptography checks passed" || { bad "The helper tool's checks failed"; printf '%s\n' "$CC" | sed 's/^/    /'; }
 
 # ---------------------------------------------------------------- 7. host posture (advice)
 section "7. How well this Mac protects the files (advice, does not affect the verdict)"
@@ -213,13 +205,13 @@ if [ "$FAIL" -eq 0 ]; then
     printf '  %s checks passed, 0 failed, %s advisory note(s) about this Mac.\n' "$PASS" "$WARN"
     printf '=====================================================================\n\n'
     printf 'Use Embalm:\n'
-    printf '  - Open Embalm from Applications, then drop a file on it.\n'
-    printf '  - Right-click a zip file: Quick Actions > Embalm.\n'
-    printf '  - Double-click any .embalm file, or right-click it: Open With > Embalm.\n'
-    printf '  - Embalmed files from email, a drive folder or a USB stick open the same way,\n'
-    printf '    even if they were renamed on the way.\n\n'
-    printf 'Installed in: %s, ~/Library/Application Support/Embalm,\n' "$APP_NOW"
-    printf '              ~/Library/Services (two Quick Actions), and the sandbox container.\n'
+    printf '  - Right-click any file: Quick Actions > Embalm.\n'
+    printf '  - Right-click a .emb file: Quick Actions > Mummify, or double-click it.\n'
+    printf '  - Or open Embalm from Applications and drop a file on it.\n'
+    printf '  - An embalmed file that was renamed on the way still opens: use Embalm on it,\n'
+    printf '    or drop it on the window. The app recognises it by its contents.\n\n'
+    printf 'Installed in: %s, ~/Library/Services (two Quick Actions),\n' "$APP_NOW"
+    printf '              and the sandbox container.\n'
     [ -d "$HERE" ] && printf 'You can delete %s now; re-run it with --assess to re-check later.\n' "$HERE"
     exit 0
 else

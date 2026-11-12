@@ -1,8 +1,9 @@
 #!/bin/bash
-# Generates a Finder Quick Action (.workflow) that runs one of the wrapper scripts.
-# Usage: make_quick_action <menu name> <wrapper script> <input UTI> <destination bundle>
+# Generates a Finder Quick Action (.workflow) that hands the selected files to
+# the Embalm app, which decides by content whether to embalm or mummify.
+# Usage: make_quick_action <menu name> <input UTI> <destination bundle>
 make_quick_action() {
-    local menu="$1" wrapper="$2" uti="$3" dest="$4"
+    local menu="$1" uti="$2" dest="$3"
     rm -rf "$dest"
     mkdir -p "$dest/Contents"
 
@@ -36,9 +37,8 @@ make_quick_action() {
 </plist>
 PLIST
 
-    # The action runs: exec <wrapper> "$@"  (input passed as arguments; the
-    # wrapper also accepts paths on stdin as a fallback).
-    local command="exec \"\$HOME/Library/Application Support/Embalm/${wrapper}\" \"\$@\""
+    # The whole action: open the selected files in Embalm.
+    local command="exec /usr/bin/open -b com.embalm.Embalm \"\$@\""
 
     cat > "$dest/Contents/document.wflow" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
