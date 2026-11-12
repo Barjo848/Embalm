@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   selftest:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Run the 36-check suite
