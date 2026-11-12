@@ -5,7 +5,6 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/tmthecoder/Argon2Swift.git",
       "state" : {
-        "branch" : "main",
         "revision" : "53543623fefe68461b7eeea03d7f96677c2fd76d"
       }
     },
