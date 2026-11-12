@@ -1,0 +1,9 @@
+release/fonts/
+dist/
+dist-repro/
+.build/
+.swiftpm/
+*.embalm
+.DS_Store
+DerivedData/
+release/private-scan.local

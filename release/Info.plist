@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>                   <string>Embalm</string>
+	<key>CFBundleDisplayName</key>            <string>Embalm</string>
+	<key>CFBundleIdentifier</key>             <string>com.embalm.Embalm</string>
+	<key>CFBundleExecutable</key>             <string>Embalm</string>
+	<key>CFBundleIconFile</key>               <string>Embalm</string>
+	<key>CFBundlePackageType</key>            <string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>      <string>en</string>
+	<key>CFBundleShortVersionString</key>     <string>1.0.0</string>
+	<key>CFBundleVersion</key>                <string>1</string>
+	<key>LSMinimumSystemVersion</key>         <string>12.0</string>
+	<key>LSApplicationCategoryType</key>      <string>public.app-category.utilities</string>
+	<key>LSMultipleInstancesProhibited</key>  <true/>
+	<key>NSPrincipalClass</key>               <string>NSApplication</string>
+	<key>NSHighResolutionCapable</key>        <true/>
+	<key>NSSupportsAutomaticTermination</key> <false/>
+	<key>NSSupportsSuddenTermination</key>    <false/>
+	<key>NSHumanReadableCopyright</key>       <string>Local file encryption. No network access.</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>        <string>com.embalm.container</string>
+			<key>UTTypeDescription</key>       <string>Embalmed file</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.data</string></array>
+			<key>UTTypeIconFile</key>          <string>EmbalmDoc</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>embalm</string></array>
+			</dict>
+		</dict>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>        <string>Embalmed file</string>
+			<key>CFBundleTypeRole</key>        <string>Editor</string>
+			<key>LSHandlerRank</key>           <string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array><string>com.embalm.container</string></array>
+			<key>CFBundleTypeIconFile</key>    <string>EmbalmDoc</string>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>        <string>Any file</string>
+			<key>CFBundleTypeRole</key>        <string>Editor</string>
+			<key>LSHandlerRank</key>           <string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array><string>public.data</string></array>
+		</dict>
+	</array>
+</dict>
+</plist>
